@@ -486,6 +486,32 @@ Ping（Packet Internet Groper），即因特网包探测器，是一种工作在
 
 IGMP（Internet Group Management Protocol）网际组管理协议，是让连接在本地局域网上的多播路由器知道本局域网上是否有主机（严格讲是主机上的某个进程）参加或退出了某个多播组。
 
+# 5 数据链路层
+
+数据链路层的三个基本问题：**封装成帧、透明传输、差错检测**
+
+数据链路（逻辑线路）：在一条物理线路之上，通过一些规程或协议来控制这些数据的传输，以保证被传输数据的正确性。实现这些规程或协议的硬件和软件加到物理线路，这样就构成了数据链路，从数据发送点到数据接收点所经过的传输途径。
+
+数据链路层在物理层提供的服务的基础上向网络层提供服务，其最基本的服务是将源自物理层来的数据可靠地传输到相邻节点的目标机网络层。主要有两个功能 ：帧编码和误差纠正控制。
+
+以太网帧格式（MAC帧格式）
+
+<img src="./pics/以太网帧格式.png" alt="kcc" style="zoom:100%;" />
+
+## 以太网帧数据为什么不能设置太大？（MTU一般为1500）
+
+MTU：最大传输单元，表示一帧最大的字节数。（包括首部和数据部）
+
+以防数据包丢失后重新传输不需要一次性传输大量数据
+
+## 为什么传输媒体上实际传送的要比MAC帧多8字节？
+
+为了接收端迅速实现位同步，从MAC子层向下传到物理层时还要在帧的前面插入8字节（由硬件生成）。
+
+第一个字段是7个字节的**前同步码**（1和0交替码）：使接收端的适配器在接收MAC帧时能迅速调整其时钟频率，使它和发送端时钟同步，实现“位同步”。
+
+第二字段**帧开始定界符**：定义为10101011，最后的11告诉接收端MAC帧信息到来。
+
 # 6 物理层
 
 本层上进行比特率的传输，详细地说就是模拟信号和数字信号的传输。
@@ -562,20 +588,23 @@ int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struc
 				1.NULL，永远等下去
 				2.设置timeval，等待固定时间
 				3.设置timeval里时间均为0，检查描述字后立即返回，轮询
+        
+    返回值：     成功：所有监听集合中满足条件的总数
+        		失败：-1 、errno
 	struct timeval {
 		long tv_sec; /* seconds */
 		long tv_usec; /* microseconds */
 	};
-	void FD_CLR(int fd, fd_set *set); 	//把文件描述符集合里fd清0
-	int FD_ISSET(int fd, fd_set *set); 	//测试文件描述符集合里fd是否置1
-	void FD_SET(int fd, fd_set *set); 	//把文件描述符集合里fd位置1
-	void FD_ZERO(fd_set *set); 			//把文件描述符集合里所有位清0
+	void FD_ZERO(fd_set *set); 			//初始化套接字集合（清空套接字集合，清0）
+	void FD_SET(int fd, fd_set *set); 	//将测试的fd加入套接字集合中
+	void FD_CLR(int fd, fd_set *set); 	//将测试的fd从套接字集合中删除
+	int FD_ISSET(int fd, fd_set *set); 	//fd是否在集合中
 
 ```
 
 流程：
 
-1. 在调用select之前告诉select 应用进程需要监控哪些fd可读、可写、异常事件，这些分别都存在一个fd_set数组中。
+1. 在调用select之前告诉select 应用进程需要监控哪些fd可读、可写、异常事件，三个时间分别存在三个集合（fd_set）中。
 2. 然后应用进程调用select的时候把3个fd_set传给**内核**（这里也就产生了一次fd_set在用户空间到内核空间的复制，内核空间在复制的时候会做安全检查，所以比直接读数据安全），内核收到fd_set后对fd_set进行遍历，然后一个个去扫描对应fd是否满足可读写事件。
 3. 如果发现了有对应的fd有读写事件后，**内核会把fd_set里没有事件状态的fd句柄清除**（所以后面需要用FD_ISSET()来判断是否有事件到达），然后把有事件的fd返回给应用进程（这里又会把fd_set从内核空间复制用户空间）。
 4. 最后应用进程收到了select返回的活跃事件类型的fd句柄后，再向对应的fd发起数据读取或者写入数据操作。
@@ -591,7 +620,7 @@ select目前几乎在所有的平台上支持，其良好跨平台支持也是�
 
 吸取了select的教训，poll模式就不再使用数组的方式来保存自己所监控的fd信息了，poll模型里面通过使用**链表**的形式来保存自己监控的fd信息，正是这样poll模型里面是没有了连接限制，可以支持高并发的请求。
 
-**不同与select使用三个数组来表示三个fdset的方式，poll传入一个结构体数组pollfd，并且通过该结构体传出结果**
+**不同于select使用三个数组来表示三个fdset的方式，poll传入一个结构体数组pollfd，并且通过该结构体传出结果**
 
 ```c++
 #include <poll.h>
@@ -605,7 +634,7 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout);
 	POLLRDNORM		数据可读
 	POLLRDBAND		优先级带数据可读
 	POLLPRI 		高优先级可读数据
-	POLLOUT		普通或带外数据可写
+	POLLOUT			普通或带外数据可写
 	POLLWRNORM		数据可写
 	POLLWRBAND		优先级带数据可写
 	POLLERR 		发生错误
@@ -627,19 +656,19 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout);
 
 ### 7.3.3 epoll
 
-epoll是在2.6内核中提出的，是之前的select和poll的增强版本。相对于select和poll来说，epoll更加灵活，**没有描述符限制**。epoll使用一个文件描述符管理多个描述符，将用户关心的**文件描述符的事件存放到内核的一个事件表中**，这样在用户空间和内核空间的copy只需一次。
+epoll是在2.6内核中提出的，是之前的select和poll的增强版本,它能显著提高程序在大量并发连接中只有少量活跃的情况下的系统CPU利用率。相对于select和poll来说，epoll更加灵活，**没有描述符限制**。epoll使用一个epoll文件描述符管理多个socket描述符，将用户关心的**文件描述符的事件存放到内核的一个事件表中**，这样在用户空间和内核空间的copy只需一次。
 
 epoll操作过程需要三个接口，分别如下：
 
 ```c++
-int epoll_create(int size)；// 创建一个epoll的句柄，size用来告诉内核这个监听的数目一共有多大
+int epoll_create(int size)；// 创建一个epoll的句柄，size用来告诉内核这个监听的数目一共有多大(预设为多大)
 int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)；// 向epoll对象添加连接的套接字
 int epoll_wait(int epfd, struct epoll_event * events, int maxevents, int timeout); // 收集发生事件的连接
 ```
 
 （1）**int epoll_create(int size);**
 
-创建一个epoll的句柄，size用来告诉内核这个监听的数目一共有多大，这个参数不同于select()中的第一个参数，给出最大监听的fd+1的值，**参数size并不是限制了epoll所能监听的描述符最大个数，只是对内核初始分配内部数据结构的一个建议**。内部采用红黑树实现的。
+创建一个epoll的句柄，size用来告诉内核这个监听的数目一共有多大，这个参数不同于select()中的第一个参数，给出最大监听的fd+1的值，**参数size并不是限制了epoll所能监听的描述符最大个数，只是对内核初始分配内部数据结构的一个建议**。内部采用**红黑树**实现的。
 
 当创建好epoll句柄后，它就会占用一个fd值，在linux下如果查看/proc/进程id/fd/，是能够看到这个fd的，所以在使用完epoll后，必须调用close()关闭，否则可能导致fd被耗尽。
 
@@ -647,7 +676,7 @@ int epoll_wait(int epfd, struct epoll_event * events, int maxevents, int timeout
 
 - 函数是对指定描述符fd执行op操作。
   \- **epfd**：是epoll_create()的返回值。
-  \- **op**：表示op操作，用三个宏来表示：添加EPOLL_CTL_ADD，删除EPOLL_CTL_DEL，修改EPOLL_CTL_MOD。分别添加、删除和修改对fd的监听事件。
+  \- **op**：表示op操作，用三个宏来表示：添加**EPOLL_CTL_ADD**，删除**EPOLL_CTL_DEL**，修改**EPOLL_CTL_MOD**。分别添加、删除和修改对fd的监听事件。
   \- **fd**：是需要监听的fd（文件描述符）
   \- **epoll_event**：是告诉内核需要监听什么事，是一个**地址**。
 
@@ -658,6 +687,12 @@ struct epoll_event {
   __uint32_t events;  /* Epoll events */
   epoll_data_t data;  /* User data variable */
 };
+typedef union epoll_data {
+			void *ptr;
+			int fd;
+			uint32_t u32;
+			uint64_t u64;
+		} epoll_data_t;
 
 //events可以是以下几个宏的集合：
 EPOLLIN ：表示对应的文件描述符可以读（包括对端SOCKET正常关闭）；
