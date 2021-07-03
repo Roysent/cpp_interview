@@ -662,7 +662,7 @@ epoll操作过程需要三个接口，分别如下：
 
 ```c++
 int epoll_create(int size)；// 创建一个epoll的句柄，size用来告诉内核这个监听的数目一共有多大(预设为多大)
-int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)；// 向epoll对象添加连接的套接字
+int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)；// 向epoll对象添加(删除、修改)连接的套接字
 int epoll_wait(int epfd, struct epoll_event * events, int maxevents, int timeout); // 收集发生事件的连接
 ```
 
@@ -701,9 +701,16 @@ EPOLLPRI：表示对应的文件描述符有紧急的数据可读（这里应该
 EPOLLERR：表示对应的文件描述符发生错误；
 EPOLLHUP：表示对应的文件描述符被挂断；
 EPOLLET： 将EPOLL设为边缘触发(Edge Triggered)模式，这是相对于水平触发(Level Triggered)来说的。
+EPOLLLT： 将EPOLL设为水平触发(默认)    
 EPOLLONESHOT：只监听一次事件，当监听完这次事件之后，如果还需要继续监听这个socket的话，需要再次把这个socket加入到EPOLL队列里
 
 ```
+
+#### epoll边缘触发与水平触发的区别
+
+Level_triggered(水平触发)：当被监控的文件描述符上有可读写事件发生时，epoll_wait()会通知处理程序去读写。如果这次没有把数据一次性全部读写完(如读写缓冲区太小)，那么下次调用 epoll_wait()时，它还会通知你在上次没读写完的文件描述符上继续读写，当然如果你一直不去读写，它会一直通知你！！！如果系统中有大量你不需要读写的就绪文件描述符，而它们每次都会返回，这样会大大降低处理程序检索自己关心的就绪文件描述符的效率！！！
+
+Edge_triggered(边缘触发)：当被监控的文件描述符上有可读写事件发生时，epoll_wait()会通知处理程序去读写。如果这次没有把数据全部读写完(如读写缓冲区太小)，那么下次调用epoll_wait()时，它不会通知你，也就是它只会通知你一次，直到该文件描述符上出现第二次可读写事件才会通知你！！！这种模式比水平触发效率高，系统不会充斥大量你不关心的就绪文件描述符！！！
 
 （3） **int epoll_wait(int epfd, struct epoll_event \* events, int maxevents, int timeout);**
 
@@ -713,11 +720,156 @@ EPOLLONESHOT：只监听一次事件，当监听完这次事件之后，如果�
 
 参数events用来从内核得到事件的集合，maxevents告之内核这个events有多大，这个maxevents的值不能大于创建epoll_create()时的size，参数timeout是超时时间（毫秒，0会立即返回，-1将不确定，也有说法说是永久阻塞）。该函数返回需要处理的事件数目，如返回0表示已超时。
 
+#### epoll 非阻塞IO
+
+```C++
+flag = fcntl(connfd,F_GETFL);		//修改connfd为非阻塞读
+flag |= O_NONBLOCK;
+fcntl(connfd,F_SETFL,flag);
+while(read(...)>0)
+```
+
+#### epoll反应堆模型（libevent库，高并发系统）
+
+```C++
+epoll反应堆模型：
+
+1）epoll --- 服务器 --- 监听 --- cfd --- 可读 --- epoll返回 --- read --- cfd从树上摘下 --- 设置监听cfd写事件 --- 小写转大写 --- 等待epoll_wait返回 --- 回写客户端（write） --- cfd从树上摘下 --- 设置监听cfd读事件 --- epoll继续监听
+
+2）evt[i].event = EPOLLIN, evt[i].data 不再使用fd，而使用 *ptr
+    *ptr 就是 struct {int fd, void (*func)(void *arg), void *arg}
+```
+
+
+
 ## 7.4 异步IO
 
 用户进程发起read(recvfrom)操作之后，立刻就可以开始去做其它的事。而另一方面，从kernel的角度，当它受到一个asynchronous read之后，首先它会立刻返回，所以不会对用户进程产生任何block。然后，kernel会等待数据准备完成，然后将数据拷贝到用户内存，当这一切都完成之后，kernel会给用户进程发送一个signal，告诉它read操作完成了。
 
-# 8 面经总结
+## 7.5 两种高效的事件处理模式
+
+### 7.5.1 Reactor模式（同步I/O模型实现）
+
+主线程只负责监听文件描述符上是否有事件发生，有的话就立即将该事件通知工作线程。
+
+工作流程：
+
+1. 主线程往epoll内核时间表注册socket上的读就绪事件
+
+2. 主线程调用epoll_wait等待socket上有数据可读
+
+3. 当socket上有数据可读时，epoll_wait通知主线程。主线程将socket可读事件放入请求队列。
+
+4. 睡眠在请求队列上的某个工作线程被唤醒，它从socket读取数据，并处理客户请求，然后往epoll内核事件表中注册该socket上的写就绪事件。
+
+5. 主线程调用epoll_wait等待socket可写。
+
+6. 当socket可写时，epoll_wait通知主线程。主线程将socket可写事件放入请求队列。
+
+7. 睡眠在请求队列上的某个工作线程被唤醒，它往socket上写入服务器处理客户请求的结果。
+
+   <img src="./pics/Reactor模式.png" alt="kcc" style="zoom:80%;" />
+
+### 7.5.2 Proactor模式（异步I/O模型实现）
+
+将所有I/O操作都交给主线程和内核来处理，工作线程只负责业务逻辑。（更符合服务器编程框架）
+
+<img src="./pics/Proactor模式.png" alt="kcc" style="zoom:80%;" />
+
+# 8 socket网络编程
+
+## 8.1 基础API
+
+### 8.1.1 setsockopt()
+
+专门用来读取和设置socket文件描述符属性的方法：
+
+```c++
+int getsockopt(int sockfd,int level,int option_name,void* option_value,socklen_t* restrict option_len);
+int setsockopt(int sockfd,int level,int option_name,const void* option_value,socklen_t option_len)
+成功时返回0，失败返回-1.并设置errno
+```
+
+## 8.2 高级I/O函数
+
+### 8.2.1 pipe函数
+
+```c++
+#include <unistd.h>
+int pipe(int fd[2]);
+fd为包含两个int型整数的数组指针。传出参数，fd[0]只用于读，fd[1]只用于写
+成功返回0，并将一对打开的文件描述符填入其参数指向的数组。
+失败返回-1，并设置errno。
+```
+
+### 8.2.2 dup函数和dup2函数
+
+把标准输入重定向到一个文件，或把标准输出重定向到一个网络连接
+
+```c++
+#include <unistd.h>
+int dup(int file_descriptor);
+创建一个新的文件描述符，该文件描述符和原有文件描述符file_descriptor指向相同文件、管道或网络连接，且dup返回的文件描述符总是取系统当前可用的最小整数值。（原文件描述符和新的文件描述符都会指向当前系统可用最小整数表示的连接）
+
+int dup2(int file_descriptor_one,int file_descriptor_two);
+返回第一个不小于file_descriptor_two的整数值。
+```
+
+### 8.2.3 readv和writev函数
+
+readv将数据从文件描述符读到分散的内存块中，即分散读；writev函数将多块分散的内存数据一并写入文件描述符中，即集中写。
+
+```c++
+#include <sys/uio.h>
+ssize_t readv(int fd,const struct iovec* vector,int count);count是vector数组的长度，即有多少块内存数据读写
+ssize_t writev(int fd,const struct iovec* vector,int count);
+struct iovec{
+    void *iov_base;			/*内存起始地址*/
+    size_t iov_len;			/*这块内存的长度*/
+}
+```
+
+### 8.2.4 sendfile函数
+
+在两个文件描述符之间直接传递数据（完全在内核中操作），避免内核缓冲区和用户缓冲区之间的数据拷贝。**零拷贝操作**
+
+```c++
+#include <sys/sendfile.h>
+ssize_t sendfile(int out_fd,int in_fd, off_t* offset,size_t count);
+out_fd必须是个socket,in_fd必须是一个支持类似mmap函数的文件描述符，即它必须指向真实的文件，不能是socket和管道
+```
+
+### 8.2.5 mmap和munmap函数
+
+mmap用于申请一段内存空间。可将这段内存空间作为进程间通信的共享内存，也可将文件直接映射其中。munmap释放这段内存。
+
+```c++
+#include <sys/mman.h>
+void* mmap(void *start,size_t length,int prot,int flags,int fd,off_t offset);
+int munmap(void *start,size_t length);
+	start：设置为NULL，则系统自动分配地址，否者从start开始分配
+	prot：设置内存段的访问权限PROT_READ、PROT_WRITE、PROT_EXEC、PROT_NONE:可读、可写、可执行、不能被访问
+	flag：控制内存段内容被修改后程序的行为。
+    fd:被映射文件对应的文件描述符
+```
+
+### 8.2.6 splice函数
+
+用于两个文件描述符之间移动数据，**零拷贝操作**
+
+```c++
+#inclued <fcntl.h>
+ssize_t splice(int fd_in,loff_t* off_in,int fd_out,loff_t off_out,size_t len,unsigned int flags);
+flag:控制数据如何移动
+```
+
+### 8.2.7 tee函数
+
+在两个管道文件描述符之间复制数据，零拷贝。且不消耗数据，因此在源文件描述符上的数据扔可以用于后续读操作
+
+### 8.2.8 fcntl函数
+
+# 9 面经总结
 
 ## 8.1 [HTTP和HTTPS](https://zhuanlan.zhihu.com/p/72616216)的区别
 
@@ -751,7 +903,7 @@ EPOLLONESHOT：只监听一次事件，当监听完这次事件之后，如果�
 
 ## 8.5 ARP协议的工作过程
 
-![](D:\Desktop\PlanBrick\CPP\interview\pics\arp.png)
+![](.\pics\arp.png)
 
 ## 8.6 什么是套接字？
 
